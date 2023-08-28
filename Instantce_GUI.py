@@ -139,7 +139,7 @@ class InstanceFinder:
             if tag.GetType() == c4d.Tnormal:
                 normal_data = tag.GetLowlevelDataAddressR()
                 normal_data = normal_data.cast('h', [len(normal_data)//6, 3])
-                normals = tuple(c4d.Vector(x / 32000., y / 32000., z / 32000.) * ~mtx for x, y, z in normal_data.tolist())
+                normals = tuple(self.convert_vector(c4d.Vector(x / 32000., y / 32000., z / 32000.) * ~mtx) for x, y, z in normal_data.tolist())
                 return hash(normals)
 
         if self.consider['uvs'] and tag.GetType() == c4d.Tuvw:
