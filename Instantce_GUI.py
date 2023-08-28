@@ -136,10 +136,11 @@ class InstanceFinder:
                 return self._hash_base_container(tag.GetData())
 
             # Hash Normal tag
-            normal_data = tag.GetLowlevelDataAddressR()
-            normal_data = normal_data.cast('h', [len(normal_data)//6, 3])
-            normals = tuple(c4d.Vector(x / 32000., y / 32000., z / 32000.) * ~mtx for x, y, z in normal_data.tolist())
-            return hash(normals)
+            if tag.GetType() == c4d.Tnormal:
+                normal_data = tag.GetLowlevelDataAddressR()
+                normal_data = normal_data.cast('h', [len(normal_data)//6, 3])
+                normals = tuple(c4d.Vector(x / 32000., y / 32000., z / 32000.) * ~mtx for x, y, z in normal_data.tolist())
+                return hash(normals)
 
         if self.consider['uvs'] and tag.GetType() == c4d.Tuvw:
             return hash(tag.GetLowlevelDataAddressR())
@@ -169,7 +170,7 @@ class InstanceFinder:
         tags = frozenset(self._hash_tag(tag, i, mg) for i, tag in enumerate(obj.GetTags()))
 
         # Hash as many or as few measures as you like together
-        instance_ident = hash(hash(point_count) + hash(poly_count) + hash(pts) + hash(uvs) + hash(tags))
+        instance_ident = hash(hash(point_count) + hash(poly_count) + hash(pts) + hash(tags))
         material_tags = [tag for tag in obj.GetTags() if tag.GetType() == c4d.Ttexture]
         self.instance_groups[instance_ident].append((obj, mg, material_tags))
 
@@ -192,19 +193,44 @@ class InstanceFinder:
 
         self.doc.StartUndo()
 
+        print(self.instance_groups)
         for instance_grp in self.instance_groups.values():
-            ref_obj, ref_mtx = instance_grp.pop()
+            ref_obj, ref_mtx, ref_materials = instance_grp.pop()
 
-            for obj, mtx in instance_grp:
+            ref_parent = c4d.BaseObject(c4d.Onull)
+            self.doc.InsertObject(ref_parent, pred = ref_obj)
+            self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, ref_parent)
+            ref_parent.SetMg(ref_obj.GetMg())
+            ref_parent.SetName(f"{ref_obj.GetName()}_parent")
+            self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, ref_obj)
+            ref_obj.Remove()
+            self.doc.InsertObject(ref_obj, parent = ref_parent)
+            self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, ref_obj)
+            ref_obj.SetMl(c4d.Matrix())
+
+            for material in ref_materials:
+                self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, material)
+                material.Remove()
+                ref_parent.InsertTag(material)
+
+            for obj, mtx, materials in instance_grp:
                 instance_obj = c4d.InstanceObject()
+                
                 if instance_obj is None:
                     raise RuntimeError("Failed to create an instance object.")
+                
                 instance_obj.SetReferenceObject(ref_obj)
                 instance_obj.SetMl(obj.GetMl() * mtx * ~ref_mtx)
                 instance_obj.SetName(obj.GetName())
                 instance_obj[c4d.INSTANCEOBJECT_RENDERINSTANCE_MODE] = c4d.INSTANCEOBJECT_RENDERINSTANCE_MODE_SINGLEINSTANCE
-                self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, instance_obj)
+
+                for material in materials:
+                    self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, material)
+                    material.Remove()
+                    instance_obj.InsertTag(material)
+
                 self.doc.InsertObject(instance_obj, pred = obj)
+                self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, instance_obj)
                 self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, obj)
                 obj.Remove()
                 count += 1
