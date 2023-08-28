@@ -163,7 +163,7 @@ class InstanceFinder:
         pts = frozenset(self.convert_vector(pt * ~mg) for pt in self.get_sample_pts(obj, self.samples))
 
         # UVs are another measure of uniqueness
-        uvs = obj.GetTag(c4d.Tuvw).GetLowlevelDataAddressR() if self.consider["uvs"] else None
+        # uvs = obj.GetTag(c4d.Tuvw).GetLowlevelDataAddressR() if self.consider["uvs"] else None
 
         #Tags should be the same as well
         tags = frozenset(self._hash_tag(tag, i, mg) for i, tag in enumerate(obj.GetTags()))
@@ -329,11 +329,9 @@ ID_SAMPLES = 10201
 ID_SEED = 10202
 ID_BLIND_MODE = 10203
 
-ID_CONSIDER_TAGORDER = 10301
-ID_CONSIDER_MATERIALS = 10302
-ID_CONSIDER_SELECTIONS = 10303
-ID_CONSIDER_OTHERTAGS = 10304
-ID_CONSIDER_UVS = 10305
+ID_CONSIDER_MATERIALS = 10301
+ID_CONSIDER_NORMALS = 10302
+ID_CONSIDER_UVS = 10303
 
 ID_BLANK = 101010
 
@@ -431,9 +429,7 @@ class Tool_WindowDialog(c4d.gui.GeDialog):
         self.GroupBorder(c4d.BORDER_GROUP_IN)
         self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE_SM, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
         self.AddCheckbox(ID_CONSIDER_MATERIALS, c4d.BFH_SCALEFIT, 0, 0, "Material Tags")
-        self.AddCheckbox(ID_CONSIDER_SELECTIONS, c4d.BFH_SCALEFIT, 0, 0, "Selection Tags")
-        self.AddCheckbox(ID_CONSIDER_OTHERTAGS, c4d.BFH_SCALEFIT, 0, 0, "Other Tags")
-        self.AddCheckbox(ID_CONSIDER_TAGORDER, c4d.BFH_SCALEFIT, 0, 0, "Order of Tags")
+        self.AddCheckbox(ID_CONSIDER_NORMALS, c4d.BFH_SCALEFIT, 0, 0, "Phong and Normals Tags")
         self.AddCheckbox(ID_CONSIDER_UVS, c4d.BFH_SCALEFIT, 0, 0, "UVs")
         self.GroupEnd()
 
@@ -469,10 +465,8 @@ class Tool_WindowDialog(c4d.gui.GeDialog):
         self.SetInt32(ID_SAMPLES, 100, min=0, max=1000, step=1, max2=100000)
         self.SetInt32(ID_SEED, 12345, min=0, max=99999, step=1)
 
-        self.SetBool(ID_CONSIDER_TAGORDER, True)
-        self.SetBool(ID_CONSIDER_MATERIALS, True)
-        self.SetBool(ID_CONSIDER_SELECTIONS, True)
-        self.SetBool(ID_CONSIDER_OTHERTAGS, True)
+        self.SetBool(ID_CONSIDER_MATERIALS, False)
+        self.SetBool(ID_CONSIDER_NORMALS, True)
         self.SetBool(ID_CONSIDER_UVS, True)
 
         selected = doc.GetActiveObjects(c4d.GETACTIVEOBJECTFLAGS_SELECTIONORDER)
@@ -495,10 +489,8 @@ class Tool_WindowDialog(c4d.gui.GeDialog):
         """
         if (id == ID_PROCESS_BTN):
             consider_dict = {
-                "tagorder":     self.GetBool(ID_CONSIDER_TAGORDER),
                 "materials":    self.GetBool(ID_CONSIDER_MATERIALS),
-                "selections":   self.GetBool(ID_CONSIDER_SELECTIONS),
-                "othertags":    self.GetBool(ID_CONSIDER_OTHERTAGS),
+                "normals":   self.GetBool(ID_CONSIDER_NORMALS),
                 "uvs":          self.GetBool(ID_CONSIDER_UVS),
             }
             instance_args = {
