@@ -106,7 +106,7 @@ class InstanceFinder:
 
         return hash(tuple(traverse_bc(bc)))
 
-    def _hash_tag(self, tag, index = 0):
+    def _hash_tag(self, tag, index = 0, mtx = c4d.Matrix()):
         if self.consider['materials'] and tag.GetType() == c4d.Ttexture:
             mat = tag.GetMaterial()
 
@@ -136,7 +136,10 @@ class InstanceFinder:
                 return self._hash_base_container(tag.GetData())
 
             # Hash Normal tag
-            return hash(tag.GetLowlevelDataAddressR())
+            normal_data = tag.GetLowlevelDataAddressR()
+            normal_data = normal_data.cast('h', [len(normal_data)//6, 3])
+            normals = tuple(c4d.Vector(x / 32000., y / 32000., z / 32000.) * ~mtx for x, y, z in normal_data.tolist())
+            return hash(normals)
 
         if self.consider['uvs'] and tag.GetType() == c4d.Tuvw:
             return hash(tag.GetLowlevelDataAddressR())
@@ -163,7 +166,7 @@ class InstanceFinder:
         uvs = obj.GetTag(c4d.Tuvw).GetLowlevelDataAddressR() if self.consider["uvs"] else None
 
         #Tags should be the same as well
-        tags = frozenset(self._hash_tag(tag, i) for i, tag in enumerate(obj.GetTags()))
+        tags = frozenset(self._hash_tag(tag, i, mg) for i, tag in enumerate(obj.GetTags()))
 
         # Hash as many or as few measures as you like together
         instance_ident = hash(hash(point_count) + hash(poly_count) + hash(pts) + hash(uvs) + hash(tags))
