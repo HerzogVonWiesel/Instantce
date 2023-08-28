@@ -196,45 +196,46 @@ class InstanceFinder:
         for instance_grp in self.instance_groups.values():
             ref_obj, ref_mtx, ref_materials = instance_grp.pop()
 
-            ref_parent = c4d.BaseObject(c4d.Onull)
-            self.doc.InsertObject(ref_parent, pred = ref_obj)
-            self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, ref_parent)
-            ref_parent.SetMg(ref_obj.GetMg())
-            ref_parent.SetName(f"{ref_obj.GetName()}_parent")
-            self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, ref_obj)
-            ref_obj.Remove()
-            self.doc.InsertObject(ref_obj, parent = ref_parent)
-            self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, ref_obj)
-            ref_obj.SetMl(c4d.Matrix())
+            if len(instance_grp) > 0:
+                ref_parent = c4d.BaseObject(c4d.Onull)
+                self.doc.InsertObject(ref_parent, pred = ref_obj)
+                self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, ref_parent)
+                ref_parent.SetMg(ref_obj.GetMg())
+                ref_parent.SetName(f"{ref_obj.GetName()}_parent")
+                self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, ref_obj)
+                ref_obj.Remove()
+                self.doc.InsertObject(ref_obj, parent = ref_parent)
+                self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, ref_obj)
+                ref_obj.SetMl(c4d.Matrix())
 
-            for material in ref_materials:
-                self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, material)
-                material.Remove()
-                ref_parent.InsertTag(material)
-
-            for obj, mtx, materials in instance_grp:
-                instance_obj = c4d.InstanceObject()
-                
-                if instance_obj is None:
-                    raise RuntimeError("Failed to create an instance object.")
-                
-                instance_obj.SetReferenceObject(ref_obj)
-                instance_obj.SetMl(obj.GetMl() * mtx * ~ref_mtx)
-                instance_obj.SetName(obj.GetName())
-                instance_obj[c4d.INSTANCEOBJECT_RENDERINSTANCE_MODE] = c4d.INSTANCEOBJECT_RENDERINSTANCE_MODE_SINGLEINSTANCE
-
-                for material in materials:
+                for material in ref_materials:
                     self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, material)
                     material.Remove()
-                    instance_obj.InsertTag(material)
+                    ref_parent.InsertTag(material)
 
-                self.doc.InsertObject(instance_obj, pred = obj)
-                self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, instance_obj)
-                self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, obj)
-                obj.Remove()
-                count += 1
-                if self.reportBack:
-                    self.reportBack.UpdateProgressBar(percent=int((count)*50/total_num)+50, col=None)
+                for obj, mtx, materials in instance_grp:
+                    instance_obj = c4d.InstanceObject()
+                    
+                    if instance_obj is None:
+                        raise RuntimeError("Failed to create an instance object.")
+                    
+                    instance_obj.SetReferenceObject(ref_obj)
+                    instance_obj.SetMl(obj.GetMl() * mtx * ~ref_mtx)
+                    instance_obj.SetName(obj.GetName())
+                    instance_obj[c4d.INSTANCEOBJECT_RENDERINSTANCE_MODE] = c4d.INSTANCEOBJECT_RENDERINSTANCE_MODE_SINGLEINSTANCE
+
+                    for material in materials:
+                        self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, material)
+                        material.Remove()
+                        instance_obj.InsertTag(material)
+
+                    self.doc.InsertObject(instance_obj, pred = obj)
+                    self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, instance_obj)
+                    self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, obj)
+                    obj.Remove()
+                    count += 1
+                    if self.reportBack:
+                        self.reportBack.UpdateProgressBar(percent=int((count)*50/total_num)+50, col=None)
 
         if self.reportBack:
             self.reportBack.StopProgressBar()
