@@ -193,7 +193,6 @@ class InstanceFinder:
 
         self.doc.StartUndo()
 
-        print(self.instance_groups)
         for instance_grp in self.instance_groups.values():
             ref_obj, ref_mtx, ref_materials = instance_grp.pop()
 
