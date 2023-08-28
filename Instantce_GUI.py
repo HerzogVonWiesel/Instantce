@@ -96,6 +96,52 @@ class InstanceFinder:
         v3 *= scale
         return c4d.Matrix(off, v1, v2, v3);
 
+    def _hash_base_container(self, bc):
+        def traverse_bc(bc):
+            for key, data in bc:
+                if type(data) == c4d.BaseContainer:
+                    yield from traverse_bc(data)
+                else:
+                    yield data
+
+        return hash(tuple(traverse_bc(bc)))
+
+    def _hash_tag(self, tag, index = 0):
+        if self.consider['materials'] and tag.GetType() == c4d.Ttexture:
+            mat = tag.GetMaterial()
+
+            if mat:
+                bc = tag.GetData()
+                poly_select = bc.GetString(c4d.TEXTURETAG_RESTRICTION)
+
+                if poly_select:
+                    poly_select_tags = [s for s in tag.GetObject().GetTags() if s.GetName() == poly_select]
+
+                    if poly_select_tags:
+                        poly_select_tag = poly_select_tags[0]
+                        obj = poly_select_tag.GetObject()
+
+                        return hash(
+                            index +
+                            hash(mat) +
+                            hash(tuple(poly_select_tag.GetBaseSelect().GetAll(obj.GetPolygonCount()))) +
+                            self._hash_base_container(bc)
+                        )
+
+                return hash(index + hash(mat) + self._hash_base_container(bc))
+
+        if self.consider['normals'] and tag.GetType() in (c4d.Tphong, c4d.Tnormal):
+            if not tag.GetObject().GetTag(c4d.Tnormal):
+                # Hash Phong tag because there are no Normal tags
+                return self._hash_base_container(tag.GetData())
+
+            # Hash Normal tag
+            return hash(tag.GetLowlevelDataAddressR())
+
+        if self.consider['uvs'] and tag.GetType() == c4d.Tuvw:
+            return hash(tag.GetLowlevelDataAddressR())
+
+
     def _calculate_hash(self, obj):
         """
             This function returns a unique hash for unique c4d.PolygonObjects
@@ -117,18 +163,12 @@ class InstanceFinder:
         uvs = obj.GetTag(c4d.Tuvw).GetLowlevelDataAddressR() if self.consider["uvs"] else None
 
         #Tags should be the same as well
-        use_order = self.consider["tagorder"]
-        tags = frozenset(
-            (i*use_order, tag.GetName(), tag[c4d.TEXTURETAG_MATERIAL], tag[c4d.TEXTURETAG_RESTRICTION]) if tag.GetType() == 5616 and self.consider["materials"] else # Texture Tag
-            (i*use_order, tag.GetName()) if tag.GetType() == 5673 and self.consider["selections"] else # Selection Tag
-            # (i*use_order, tag.GetName(), tag.GetBaseSelect()) if tag.GetType() == 5673 else # Selection Tag
-            (i*use_order, tag.GetName()) if not tag.GetType() in [5616, 5673] and self.consider["othertags"] else # Other Tags
-            ()
-            for i, tag in enumerate(obj.GetTags())) | frozenset({()}) # Add an empty tuple since generator breaks if it sees many tags once (or C4D has hidden tags, I don't know)
+        tags = frozenset(self._hash_tag(tag, i) for i, tag in enumerate(obj.GetTags()))
 
         # Hash as many or as few measures as you like together
         instance_ident = hash(hash(point_count) + hash(poly_count) + hash(pts) + hash(uvs) + hash(tags))
-        self.instance_groups[instance_ident].append((obj, mg))
+        material_tags = [tag for tag in obj.GetTags() if tag.GetType() == c4d.Ttexture]
+        self.instance_groups[instance_ident].append((obj, mg, material_tags))
 
         return instance_ident
 
