@@ -574,3 +574,5 @@ if __name__=='__main__':
                                       help=c4d.plugins.GeLoadString(c4d.IDS_INSTANTCE_HELP),
                                       dat=InstantceCommand(),
                                       icon=None)
+    
+    print("Successfully registered Instantce plugin!")
