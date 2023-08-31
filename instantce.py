@@ -405,6 +405,10 @@ class Tool_WindowDialog(c4d.gui.GeDialog):
 
     # UI Layout
     def CreateLayout(self):
+
+        return self.LoadDialogResource(c4d.DLG_INSTANTCE_MAIN, plugin_res)
+
+        """
         # Dialog Title
         self.SetTitle("Instantce Demo")
         
@@ -477,7 +481,7 @@ class Tool_WindowDialog(c4d.gui.GeDialog):
     
         self.GroupEnd() 
         self.GroupEnd() # End of the overall group.        
-        return True
+        """
 
     def InitValues(self):
         """ 
@@ -541,7 +545,32 @@ class Tool_WindowDialog(c4d.gui.GeDialog):
         return True
 
 
+class InstantceCommand(c4d.plugins.CommandData):
+    dialog = None
+
+    def Execute(self, doc):
+        if self.dialog is None:
+            self.dialog = Tool_WindowDialog()
+
+        return self.dialog.Open(c4d.DLG_TYPE_ASYNC, PLUGIN_ID)
+    
+    def RestoreLayout(self, secret):
+        if self.dialog is None:
+            self.dialog = Tool_WindowDialog()
+        
+        return self.dialog.Restore(PLUGIN_ID, secret)
+
 
 if __name__=='__main__':
-    class_dialog = Tool_WindowDialog()
-    class_dialog.Open(c4d.DLG_TYPE_ASYNC, defaultw=0, defaulth=0)
+    plugin_dir = os.path.dirname(__file__)
+    plugin_res = c4d.plugins.GeResource()
+
+    if not plugin_res.Init(plugin_dir):
+        raise RuntimeError(f"Could not access resources at {plugin_dir}")
+
+    c4d.plugins.RegisterCommandPlugin(id=PLUGIN_ID,
+                                      str=c4d.plugins.GeLoadString(c4d.IDS_INSTANTCE_NAME),
+                                      info=0,
+                                      help=c4d.plugins.GeLoadString(c4d.IDS_INSTANTCE_HELP),
+                                      dat=InstantceCommand(),
+                                      icon=None)
