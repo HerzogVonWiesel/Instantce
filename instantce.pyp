@@ -14,12 +14,10 @@ import time
 from c4d import plugins, gui, bitmaps, documents, storage, utils
 from collections import defaultdict
 import typing
-
-doc: c4d.documents.BaseDocument  # The currently active document.
-op: typing.Optional[c4d.BaseObject]  # The selected object within that active document. Can be None.
+import symbol_parser
 
 class InstanceFinder:
-    def __init__(self, objects, consider_dict, precision = 3, samples = 100, seed = 12345, reportBack = None, doc = c4d.documents.GetActiveDocument()):
+    def __init__(self, objects, consider_dict, precision = 3, samples = 100, seed = 12345, reportBack = None, doc = documents.GetActiveDocument()):
         self.doc = doc
         self.reportBack = reportBack
         self.consider = consider_dict
@@ -255,7 +253,8 @@ def startInstantce(objects, instance_args, reportBack):
                                      precision = instance_args["precision"], 
                                      samples = instance_args["samples"], 
                                      seed = instance_args["seed"],
-                                     reportBack = reportBack)
+                                     reportBack = reportBack,
+                                     doc = documents.GetActiveDocument())
     instance_count = instance_finder.create_instances()
     total_count = instance_finder.poly_objs_count
 
@@ -341,58 +340,42 @@ def Stop_ProgressBar(ui_ins, progressbar_ui_id):
 
 # ------------------------------------------------------------------------------------ #
 
-GROUP_BORDER_SPACE = 6
-GROUP_BORDER_SPACE_SM = GROUP_BORDER_SPACE - 2
+# ----------------------------------------
+#  // UI Object List Subdialog //
+# ----------------------------------------
 
-ID_INEXCLUDE_LIST = 10000
-ID_PROCESS_BTN = 10001
+class InstanceObjectListDialog(c4d.gui.SubDialog):
+    def __init__(self):  
+        super().__init__()
 
-ID_PROGRESSBAR = 10100
-ID_PROGRESSBAR_TEXT = 10101
+    def CreateLayout(self):
+        #First create a container that will hold the items we will allow to be dropped into the INEXCLUDE_LIST gizmo
+        acceptedObjs = c4d.BaseContainer()
+        acceptedObjs.InsData(c4d.Opolygon, "") # -> # Accept point objects 
+                                                # Take a look at c4d Objects Types in SDK.
+        # Create another base container for the INEXCLUDE_LIST gizmo's settings and add the above container to it
+        bc = c4d.BaseContainer()
+        bc.SetData(c4d.IN_EXCLUDE_FLAG_SEND_SELCHANGE_MSG, True)
+        bc.SetData(c4d.IN_EXCLUDE_FLAG_INIT_STATE, 1)
+        """ 
+        Its buttons with states for each object in the list container gui of the CUSTOMGUI_INEXCLUDE_LIST.
+        feel free to enable this in the ui by seting the  enable_state_flags to True. 
+        """
+        bc.SetData(c4d.IN_EXCLUDE_FLAG_NUM_FLAGS, 1)
+        # button 1
+        bc.SetData(c4d.IN_EXCLUDE_FLAG_IMAGE_01_ON, c4d.RESOURCEIMAGE_OK) # -> Id Icon or Plugin Id 
+        bc.SetData(c4d.IN_EXCLUDE_FLAG_IMAGE_01_OFF, c4d.RESOURCEIMAGE_CANCEL)
 
-ID_PRECISION = 10200
-ID_SAMPLES = 10201
-ID_SEED = 10202
-ID_BLIND_MODE = 10203
+        bc.SetData(c4d.DESC_ACCEPT, acceptedObjs)        
 
-ID_CONSIDER_MATERIALS = 10301
-ID_CONSIDER_NORMALS = 10302
-ID_CONSIDER_UVS = 10303
+        self.AddCustomGui(INSTANTCE_ID_INEXCLUDE_LIST, c4d.CUSTOMGUI_INEXCLUDE_LIST, "", c4d.BFH_SCALEFIT|c4d.BFV_SCALEFIT, 0, 0, bc)
+        return True
 
-ID_BLANK = 101010
 
 # ----------------------------------------
 #  // UI Main Window //
 # ----------------------------------------
-class Tool_WindowDialog(c4d.gui.GeDialog):
-    
-    # GUI Ids
-    IDS_VER = 999
-    IDS_OverallGrp = 1000
-    IDS_StaticText = 1001 
-    IDS_MULTI_LINE_STRINGBOX = 1004
-
-    def Process(self, instance_args):
-        LinkList = self.FindCustomGui(ID_INEXCLUDE_LIST, c4d.CUSTOMGUI_INEXCLUDE_LIST)
-        ObjectListData = LinkList.GetData()
-        objs = [ObjectListData.ObjectFromIndex(doc, i) for i in range(ObjectListData.GetObjectCount()) if ObjectListData.GetFlags(i)]
-        if objs:
-            startInstantce(objects=objs, instance_args=instance_args, reportBack = self)
-        else: 
-            print("No Objects in the List")
-        return True
-    
-    def UpdateProgressBar(self, percent, col):
-        """ Update Progress Bar """
-        # self.SetString(self.IDS_PROCESSBAR_TEXT, Run_ProcessBar(ui_ins=self, progressbar_ui_id=self.IDS_PROCESSBAR_GUI, percent_ui_id=self.IDS_PROCESSBAR_TEXT , percent=percent, col=col))
-        Run_ProcessBar(ui_ins=self, progressbar_ui_id=ID_PROGRESSBAR, percent_ui_id=ID_PROGRESSBAR_TEXT , percent=percent, col=col)
-        return True
-    
-    def StopProgressBar(self):
-        """ Stop Progress Bar """
-        Stop_ProgressBar(ui_ins=self, progressbar_ui_id=ID_PROGRESSBAR)
-        return True       
-        
+class InstantceMainDialog(c4d.gui.GeDialog):
     # ====================================== #        
     #  Main GeDialog Class Overrides
     # ====================================== #
@@ -401,106 +384,66 @@ class Tool_WindowDialog(c4d.gui.GeDialog):
         The __init__ is an Constuctor and help get 
         and passes data on from the another class.
         """        
-        super(Tool_WindowDialog, self).__init__()
+        super(InstantceMainDialog, self).__init__()
+
+        self.object_list_subdlg = InstanceObjectListDialog()
+
+
+    def Process(self, instance_args):
+        doc = documents.GetActiveDocument()
+        LinkList = self.object_list_subdlg.FindCustomGui(INSTANTCE_ID_INEXCLUDE_LIST, c4d.CUSTOMGUI_INEXCLUDE_LIST)
+        ObjectListData = LinkList.GetData()
+        objs = [ObjectListData.ObjectFromIndex(doc, i) for i in range(ObjectListData.GetObjectCount()) if ObjectListData.GetFlags(i)]
+        if objs:
+            startInstantce(objects=objs, instance_args=instance_args, reportBack = self)
+        else: 
+            print("No Objects in the List")
+        return True
+
+
+    def UpdateProgressBar(self, percent, col):
+        """ Update Progress Bar """
+        # self.SetString(self.IDS_PROCESSBAR_TEXT, Run_ProcessBar(ui_ins=self, progressbar_ui_id=self.IDS_PROCESSBAR_GUI, percent_ui_id=self.IDS_PROCESSBAR_TEXT , percent=percent, col=col))
+        Run_ProcessBar(ui_ins=self, progressbar_ui_id=INSTANTCE_ID_PROGRESSBAR, percent_ui_id=INSTANTCE_ID_PROGRESSBAR_TEXT , percent=percent, col=col)
+        return True
+
+
+    def StopProgressBar(self):
+        """ Stop Progress Bar """
+        Stop_ProgressBar(ui_ins=self, progressbar_ui_id=INSTANTCE_ID_PROGRESSBAR)
+        return True       
+        
 
     # UI Layout
     def CreateLayout(self):
+        result =  self.LoadDialogResource(DLG_INSTANTCE_MAIN)
 
-        return self.LoadDialogResource(c4d.DLG_INSTANTCE_MAIN, plugin_res)
+        if not self.AttachSubDialog(self.object_list_subdlg, DLG_INSTANTCE_OBJECT_LIST):
+            raise RuntimeError("Failed to attach subdialog element.")
 
-        """
-        # Dialog Title
-        self.SetTitle("Instantce Demo")
-        
-        # Top Menu addinng Tool Version
-        self.GroupBeginInMenuLine()
-        self.AddStaticText(self.IDS_VER, 0)
-        self.SetString(self.IDS_VER, " v1.0  ")
-        self.GroupEnd()        
-        
-        self.GroupBegin(self.IDS_OverallGrp, c4d.BFH_SCALEFIT, 1, 0, "") # Overall Group.
-        
-        # Static UI Text
-        # self.AddStaticText(self.IDS_StaticText, c4d.BFH_CENTER, 0, 15, "Instantce Demo", c4d.BORDER_WITH_TITLE_BOLD)
-        
-        self.AddSeparatorH(0, c4d.BFH_SCALEFIT) # Line Separator / eg: self.AddSeparatorH(0, c4d.BFH_MASK) and AddSeparatorV 
+        self.LayoutChanged(DLG_INSTANTCE_OBJECT_LIST)
 
-        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT, 2, 0, "") 
-        self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
-        
-        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT, 1, 0, "") 
-        self.AddStaticText(ID_BLANK, c4d.BFH_LEFT, 0, 15, " Add Objects :", c4d.BORDER_WITH_TITLE_BOLD)
-        AddLinkBoxList_GUI(ui_ins=self, ui_id=ID_INEXCLUDE_LIST, w_size=500, h_size=300, enable_state_flags=True)
-        self.GroupEnd()        
+        return result
 
-        # self.AddSeparatorV(0, c4d.BFV_SCALEFIT)
-        
-        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT|c4d.BFV_TOP, 1, 0, "")
-        self.AddStaticText(ID_BLANK, c4d.BFH_LEFT, 0, 15, " Settings :", c4d.BORDER_WITH_TITLE_BOLD)
-        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT, title="Precision")
-        self.GroupBorder(c4d.BORDER_GROUP_IN)
-        self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE_SM, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
-        self.AddEditSlider(ID_PRECISION, c4d.BFH_SCALEFIT, 0, 0)
-        self.GroupEnd()
-
-        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT, title="Samples")
-        self.GroupBorder(c4d.BORDER_GROUP_IN)
-        self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE_SM, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
-        self.AddEditSlider(ID_SAMPLES, c4d.BFH_SCALEFIT, 0, 0)
-        self.GroupEnd()
-
-        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT, title="Sampling Seed")
-        self.GroupBorder(c4d.BORDER_GROUP_IN)
-        self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE_SM, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
-        self.AddEditSlider(ID_SEED, c4d.BFH_SCALEFIT, 0, 0)
-        self.GroupEnd()
-
-        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT, title="Consider", cols=1)
-        self.GroupBorder(c4d.BORDER_GROUP_IN)
-        self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE_SM, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
-        self.AddCheckbox(ID_CONSIDER_MATERIALS, c4d.BFH_SCALEFIT, 0, 0, "Material Tags")
-        self.AddCheckbox(ID_CONSIDER_NORMALS, c4d.BFH_SCALEFIT, 0, 0, "Phong and Normals Tags")
-        self.AddCheckbox(ID_CONSIDER_UVS, c4d.BFH_SCALEFIT, 0, 0, "UVs")
-        self.GroupEnd()
-
-        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT)
-        self.GroupBorder(c4d.BORDER_GROUP_IN)
-        self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE_SM, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
-        self.AddCheckbox(ID_BLIND_MODE, c4d.BFH_SCALEFIT, 0, 0, "Blind Mode")
-        self.GroupEnd()
-        self.GroupEnd()  
-        
-        self.GroupEnd() 
-                      
-        self.AddSeparatorH(0, c4d.BFH_SCALEFIT)
-        Add_ProgressBar_GUI(ui_ins=self, progressbar_ui_id=ID_PROGRESSBAR, strText_id=ID_PROGRESSBAR_TEXT, w_size=100, h_size=10)
-        self.AddSeparatorH(0, c4d.BFH_SCALEFIT)
-        self.AddButton(ID_PROCESS_BTN, c4d.BFH_SCALEFIT, 0, 30, name="Instantce!") 
-        
-        # self.AddSeparatorH(0, c4d.BFH_SCALEFIT)
-    
-        self.GroupEnd() 
-        self.GroupEnd() # End of the overall group.        
-        """
 
     def InitValues(self):
         """ 
         Called when the dialog is initialized by the GUI / GUI's startup values basically.
         """
         # self.SetDefaultColor(self.IDS_OverallGrp, c4d.COLOR_BG, BG_DARK)
-        self.SetDefaultColor(self.IDS_StaticText, c4d.COLOR_TEXT, DARK_BLUE_TEXT_COL) 
-        self.SetDefaultColor(self.IDS_VER, c4d.COLOR_TEXT, DARK_RED_TEXT_COL)
-        self.SetString(ID_PROGRESSBAR_TEXT, "0%")
-        self.SetInt32(ID_PRECISION, 3, min=0, max=5, step=1, max2=10)
-        self.SetInt32(ID_SAMPLES, 100, min=0, max=1000, step=1, max2=100000)
-        self.SetInt32(ID_SEED, 12345, min=0, max=99999, step=1)
+        # self.SetDefaultColor(self.IDS_StaticText, c4d.COLOR_TEXT, DARK_BLUE_TEXT_COL) 
+        self.SetDefaultColor(INSTANTCE_ID_VER, c4d.COLOR_TEXT, DARK_RED_TEXT_COL)
+        self.SetString(INSTANTCE_ID_PROGRESSBAR_TEXT, "0%")
+        self.SetInt32(INSTANTCE_ID_PRECISION, 3, min=1, max=5, step=1, min2=1, max2=10)
+        self.SetInt32(INSTANTCE_ID_SAMPLES, 100, min=10, max=1000, step=1, min2=10, max2=100000)
+        self.SetInt32(INSTANTCE_ID_SEED, 12345, min=0, max=99999, step=1)
 
-        self.SetBool(ID_CONSIDER_MATERIALS, False)
-        self.SetBool(ID_CONSIDER_NORMALS, True)
-        self.SetBool(ID_CONSIDER_UVS, True)
+        self.SetBool(INSTANTCE_ID_CONSIDER_MATERIALS, False)
+        self.SetBool(INSTANTCE_ID_CONSIDER_NORMALS, True)
+        self.SetBool(INSTANTCE_ID_CONSIDER_UVS, True)
 
-        selected = doc.GetActiveObjects(c4d.GETACTIVEOBJECTFLAGS_SELECTIONORDER)
-        LinkList =  self.FindCustomGui(ID_INEXCLUDE_LIST, c4d.CUSTOMGUI_INEXCLUDE_LIST)
+        selected = documents.GetActiveDocument().GetActiveObjects(c4d.GETACTIVEOBJECTFLAGS_SELECTIONORDER)
+        LinkList =  self.object_list_subdlg.FindCustomGui(INSTANTCE_ID_INEXCLUDE_LIST, c4d.CUSTOMGUI_INEXCLUDE_LIST)
         LinkListData = LinkList.GetData()
         for obj in selected:
             LinkListData.InsertObject(obj, 1)
@@ -517,17 +460,17 @@ class Tool_WindowDialog(c4d.gui.GeDialog):
         :param bc: The original message container
         :return: False if there was an error, otherwise True.
         """
-        if (id == ID_PROCESS_BTN):
+        if (id == INSTANTCE_ID_PROCESS_BTN):
             consider_dict = {
-                "materials":    self.GetBool(ID_CONSIDER_MATERIALS),
-                "normals":   self.GetBool(ID_CONSIDER_NORMALS),
-                "uvs":          self.GetBool(ID_CONSIDER_UVS),
+                "materials":    self.GetBool(INSTANTCE_ID_CONSIDER_MATERIALS),
+                "normals":   self.GetBool(INSTANTCE_ID_CONSIDER_NORMALS),
+                "uvs":          self.GetBool(INSTANTCE_ID_CONSIDER_UVS),
             }
             instance_args = {
-                "precision":    self.GetBool(ID_PRECISION),
-                "samples":      self.GetBool(ID_SAMPLES),
-                "seed":         self.GetBool(ID_SEED),
-                "blind":        self.GetBool(ID_BLIND_MODE),
+                "precision":    self.GetBool(INSTANTCE_ID_PRECISION),
+                "samples":      self.GetBool(INSTANTCE_ID_SAMPLES),
+                "seed":         self.GetBool(INSTANTCE_ID_SEED),
+                "blind":        self.GetBool(INSTANTCE_ID_BLIND_MODE),
                 "consider":     consider_dict,
             }
             self.Process(instance_args)
@@ -550,29 +493,27 @@ class InstantceCommand(c4d.plugins.CommandData):
 
     def Execute(self, doc):
         if self.dialog is None:
-            self.dialog = Tool_WindowDialog()
+            self.dialog = InstantceMainDialog()
 
         return self.dialog.Open(c4d.DLG_TYPE_ASYNC, PLUGIN_ID)
     
     def RestoreLayout(self, secret):
         if self.dialog is None:
-            self.dialog = Tool_WindowDialog()
+            self.dialog = InstantceMainDialog()
         
         return self.dialog.Restore(PLUGIN_ID, secret)
 
-
 if __name__=='__main__':
     plugin_dir = os.path.dirname(__file__)
-    plugin_res = c4d.plugins.GeResource()
 
-    if not plugin_res.Init(plugin_dir):
-        raise RuntimeError(f"Could not access resources at {plugin_dir}")
+    symbol_parser.parse_and_export_in_caller(plugin_dir)
 
+    if not c4d.plugins.GeResource().Init(plugin_dir):
+            raise RuntimeError(f"Could not access resource at {plugin_dir}")
+    
     c4d.plugins.RegisterCommandPlugin(id=PLUGIN_ID,
-                                      str=c4d.plugins.GeLoadString(c4d.IDS_INSTANTCE_NAME),
+                                      str=IDS_INSTANTCE_NAME,
                                       info=0,
-                                      help=c4d.plugins.GeLoadString(c4d.IDS_INSTANTCE_HELP),
+                                      help=IDS_INSTANTCE_HELP,
                                       dat=InstantceCommand(),
                                       icon=None)
-    
-    print("Successfully registered Instantce plugin!")
