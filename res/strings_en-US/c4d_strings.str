@@ -1,5 +1,5 @@
 STRINGTABLE
 {
     IDS_INSTANTCE_NAME  "Instantce";
-    IDS_INSTANTCE_HELP  "Finds identical objects and replaces them with instances";
+    IDS_INSTANTCE_HELP  "Find identical polygon objects and replace them with instances";
 }
