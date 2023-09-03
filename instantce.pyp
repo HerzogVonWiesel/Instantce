@@ -512,8 +512,8 @@ if __name__=='__main__':
             raise RuntimeError(f"Could not access resource at {plugin_dir}")
     
     c4d.plugins.RegisterCommandPlugin(id=PLUGIN_ID,
-                                      str=IDS_INSTANTCE_NAME,
+                                      str=c4d.plugins.GeLoadString(IDS_INSTANTCE_NAME),
                                       info=0,
-                                      help=IDS_INSTANTCE_HELP,
+                                      help=c4d.plugins.GeLoadString(IDS_INSTANTCE_HELP),
                                       dat=InstantceCommand(),
                                       icon=None)
