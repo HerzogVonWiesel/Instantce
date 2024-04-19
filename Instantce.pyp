@@ -46,7 +46,7 @@ class InstanceFinder:
 
     def sample_pts_a(self, obj, count, total_num):
         
-        random.seed(123456)
+        random.seed(self.seed)
         sample_indices = random.sample(range(total_num), count)
         
         return (obj.GetPoint(i) for i in sample_indices)
@@ -54,7 +54,7 @@ class InstanceFinder:
     def sample_pts_b(self, obj, count):
         all_points = obj.GetAllPoints()
         
-        random.seed(123456)
+        random.seed(self.seed)
         samples = random.sample(all_points, count)
 
         return samples
@@ -118,7 +118,7 @@ class InstanceFinder:
             mat = tag.GetMaterial()
 
             if mat:
-                bc = tag.GetData()
+                bc = tag.GetDataInstance()
                 # print(self._hash_base_container(bc))
                 poly_select = bc.GetString(c4d.TEXTURETAG_RESTRICTION)
 
@@ -140,7 +140,7 @@ class InstanceFinder:
         if self.consider['normals'] and tag.GetType() in (c4d.Tphong, c4d.Tnormal):
             if not tag.GetObject().GetTag(c4d.Tnormal):
                 # Hash Phong tag because there are no Normal tags
-                return self._hash_base_container(tag.GetData())
+                return self._hash_base_container(tag.GetDataInstance())
 
             # Hash Normal tag
             return hash(tag.GetLowlevelDataAddressR())
@@ -655,13 +655,13 @@ class MainDialog(c4d.gui.GeDialog):
         if (id == ID_EXTRACT_BTN and not self.extracted):
             consider_dict = {
                 "materials":    self.GetBool(ID_CONSIDER_MATERIALS),
-                "normals":   self.GetBool(ID_CONSIDER_NORMALS),
+                "normals":      self.GetBool(ID_CONSIDER_NORMALS),
                 "uvs":          self.GetBool(ID_CONSIDER_UVS),
             }
             instance_args = {
-                "precision":    self.GetBool(ID_PRECISION),
-                "samples":      self.GetBool(ID_SAMPLES),
-                "seed":         self.GetBool(ID_SEED),
+                "precision":    self.GetInt32(ID_PRECISION),
+                "samples":      self.GetInt32(ID_SAMPLES),
+                "seed":         self.GetInt32(ID_SEED),
                 "blind":        self.GetBool(ID_BLIND_MODE),
                 "consider":     consider_dict,
             }
