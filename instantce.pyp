@@ -1,23 +1,29 @@
 """
 Instantce: Instantly recognize and replace objects with instances!
 Authors: Jérôme Stephan & Darby Edelen
+
+Possible future TODO:
+    - Speed up tree / list view fns by using deques instead of lists
 """
 PLUGIN_ID = 1061542
 
+from typing import Union
 import c4d
 import os
 import sys
-import webbrowser 
-import math 
+import webbrowser
 import random
 import time
-from c4d import plugins, gui, bitmaps, documents, storage, utils
 from collections import defaultdict
 import typing
-import symbol_parser
+
+from c4d import Vector
+
+doc: c4d.documents.BaseDocument = None # The currently active document.
+op: typing.Optional[c4d.BaseObject]  # The selected object within that active document. Can be None.
 
 class InstanceFinder:
-    def __init__(self, objects, consider_dict, precision = 3, samples = 100, seed = 12345, reportBack = None, doc = documents.GetActiveDocument()):
+    def __init__(self, objects, consider_dict, precision = 3, samples = 100, seed = 12345, reportBack = None, doc = c4d.documents.GetActiveDocument()):
         self.doc = doc
         self.reportBack = reportBack
         self.consider = consider_dict
@@ -40,7 +46,7 @@ class InstanceFinder:
 
     def sample_pts_a(self, obj, count, total_num):
         
-        random.seed(123456)
+        random.seed(self.seed)
         sample_indices = random.sample(range(total_num), count)
         
         return (obj.GetPoint(i) for i in sample_indices)
@@ -48,7 +54,7 @@ class InstanceFinder:
     def sample_pts_b(self, obj, count):
         all_points = obj.GetAllPoints()
         
-        random.seed(123456)
+        random.seed(self.seed)
         samples = random.sample(all_points, count)
 
         return samples
@@ -96,7 +102,10 @@ class InstanceFinder:
 
     def _hash_base_container(self, bc):
         def traverse_bc(bc):
+            ignore_keys = [1011, 1012, 1013] if bc[1004] == 6 else [] # Ignore texture positions if tag is set to UVW
             for key, data in bc:
+                if key in ignore_keys:
+                    continue
                 if type(data) == c4d.BaseContainer:
                     yield from traverse_bc(data)
                 else:
@@ -104,12 +113,13 @@ class InstanceFinder:
 
         return hash(tuple(traverse_bc(bc)))
 
-    def _hash_tag(self, tag, index = 0, mtx = c4d.Matrix()):
+    def _hash_tag(self, tag, index = 0):
         if self.consider['materials'] and tag.GetType() == c4d.Ttexture:
             mat = tag.GetMaterial()
 
             if mat:
-                bc = tag.GetData()
+                bc = tag.GetDataInstance()
+                # print(self._hash_base_container(bc))
                 poly_select = bc.GetString(c4d.TEXTURETAG_RESTRICTION)
 
                 if poly_select:
@@ -125,20 +135,15 @@ class InstanceFinder:
                             hash(tuple(poly_select_tag.GetBaseSelect().GetAll(obj.GetPolygonCount()))) +
                             self._hash_base_container(bc)
                         )
-
                 return hash(index + hash(mat) + self._hash_base_container(bc))
 
         if self.consider['normals'] and tag.GetType() in (c4d.Tphong, c4d.Tnormal):
             if not tag.GetObject().GetTag(c4d.Tnormal):
                 # Hash Phong tag because there are no Normal tags
-                return self._hash_base_container(tag.GetData())
+                return self._hash_base_container(tag.GetDataInstance())
 
             # Hash Normal tag
-            if tag.GetType() == c4d.Tnormal:
-                normal_data = tag.GetLowlevelDataAddressR()
-                normal_data = normal_data.cast('h', [len(normal_data)//6, 3])
-                normals = tuple(self.convert_vector(c4d.Vector(x / 32000., y / 32000., z / 32000.) * ~mtx) for x, y, z in normal_data.tolist())
-                return hash(normals)
+            return hash(tag.GetLowlevelDataAddressR())
 
         if self.consider['uvs'] and tag.GetType() == c4d.Tuvw:
             return hash(tag.GetLowlevelDataAddressR())
@@ -165,12 +170,12 @@ class InstanceFinder:
         # uvs = obj.GetTag(c4d.Tuvw).GetLowlevelDataAddressR() if self.consider["uvs"] else None
 
         #Tags should be the same as well
-        tags = frozenset(self._hash_tag(tag, i, mg) for i, tag in enumerate(obj.GetTags()))
+        tags = frozenset(self._hash_tag(tag, i) for i, tag in enumerate(obj.GetTags()))
 
         # Hash as many or as few measures as you like together
         instance_ident = hash(hash(point_count) + hash(poly_count) + hash(pts) + hash(tags))
         material_tags = [tag for tag in obj.GetTags() if tag.GetType() == c4d.Ttexture]
-        self.instance_groups[instance_ident].append((obj, mg, material_tags))
+        self.instance_groups[instance_ident].append({"obj": obj, "mg": mg, "mat_tags": material_tags, "hash": instance_ident, "opened": True})
 
         return instance_ident
 
@@ -179,7 +184,9 @@ class InstanceFinder:
         for i, obj in enumerate(self.poly_objs):
             self._calculate_hash(obj)
             if self.reportBack:
-                self.reportBack.UpdateProgressBar(percent=int((i+1)*50/total_num), col=None)
+                self.reportBack.UpdateProgressBar(percent=int((i+1)*100/total_num), col=None)
+        if self.reportBack:
+            self.reportBack.StopProgressBar()
 
 
     def create_instances(self):
@@ -192,9 +199,13 @@ class InstanceFinder:
         self.doc.StartUndo()
 
         for instance_grp in self.instance_groups.values():
-            ref_obj, ref_mtx, ref_materials = instance_grp.pop()
+            instance_grp.reverse()
+            element = instance_grp.pop()
+            ref_obj = element["obj"]
+            ref_mtx = element["mg"]
+            ref_materials = element["mat_tags"]
 
-            if len(instance_grp) > 0:
+            if not self.consider["materials"]:
                 ref_parent = c4d.BaseObject(c4d.Onull)
                 self.doc.InsertObject(ref_parent, pred = ref_obj)
                 self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, ref_parent)
@@ -211,171 +222,292 @@ class InstanceFinder:
                     material.Remove()
                     ref_parent.InsertTag(material)
 
-                for obj, mtx, materials in instance_grp:
-                    instance_obj = c4d.InstanceObject()
-                    
-                    if instance_obj is None:
-                        raise RuntimeError("Failed to create an instance object.")
-                    
-                    instance_obj.SetReferenceObject(ref_obj)
-                    instance_obj.SetMl(obj.GetMl() * mtx * ~ref_mtx)
-                    instance_obj.SetName(obj.GetName())
-                    instance_obj[c4d.INSTANCEOBJECT_RENDERINSTANCE_MODE] = c4d.INSTANCEOBJECT_RENDERINSTANCE_MODE_SINGLEINSTANCE
+            for element in instance_grp:
+                obj = element["obj"]
+                mtx = element["mg"]
+                materials = element["mat_tags"]
 
+                instance_obj = c4d.InstanceObject()
+                if instance_obj is None:
+                    raise RuntimeError("Failed to create an instance object.")
+                instance_obj.SetReferenceObject(ref_obj)
+                instance_obj.SetMl(obj.GetMl() * mtx * ~ref_mtx)
+                instance_obj.SetName(obj.GetName())
+                instance_obj[c4d.INSTANCEOBJECT_RENDERINSTANCE_MODE] = c4d.INSTANCEOBJECT_RENDERINSTANCE_MODE_SINGLEINSTANCE
+
+                if not self.consider["materials"]:
                     for material in materials:
                         self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, material)
                         material.Remove()
                         instance_obj.InsertTag(material)
 
-                    self.doc.InsertObject(instance_obj, pred = obj)
-                    self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, instance_obj)
-                    self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, obj)
-                    obj.Remove()
-                    count += 1
-                    if self.reportBack:
-                        self.reportBack.UpdateProgressBar(percent=int((count)*50/total_num)+50, col=None)
+                self.doc.InsertObject(instance_obj, pred = obj)
+                self.doc.AddUndo(c4d.UNDOTYPE_NEWOBJ, instance_obj)
+                self.doc.AddUndo(c4d.UNDOTYPE_DELETEOBJ, obj)
+                obj.Remove()
+                count += 1
+                if self.reportBack:
+                    self.reportBack.UpdateProgressBar(percent=int((count)*100/total_num), col=None)
 
         if self.reportBack:
             self.reportBack.StopProgressBar()
 
         self.doc.EndUndo()
 
-        return count
-
-def startInstantce(objects, instance_args, reportBack):
-    start = time.perf_counter()
-    blind = instance_args["blind"]
-
-    if blind:
-        reportBack = None
-    instance_finder = InstanceFinder(objects, 
-                                     consider_dict = instance_args["consider"],
-                                     precision = instance_args["precision"], 
-                                     samples = instance_args["samples"], 
-                                     seed = instance_args["seed"],
-                                     reportBack = reportBack,
-                                     doc = documents.GetActiveDocument())
-    instance_count = instance_finder.create_instances()
-    total_count = instance_finder.poly_objs_count
-
-    duration = time.perf_counter() - start
-    if instance_count > 0:
-        print(f"Replaced {instance_count} objects with instances in {duration:.03} seconds ({(instance_count/duration):.02f} objects / second). Remaining objects: {total_count - instance_count}")
-
-    c4d.EventAdd()
+        return True
 
 # Colors
-BG_DARK = c4d.Vector(0.1015625, 0.09765625, 0.10546875)
+BG_DARK = c4d.Vector(0.13, 0.13, 0.13)
+BG_DARKER = c4d.Vector(0.11, 0.11, 0.11)
 DARK_BLUE_TEXT_COL = c4d.Vector(0, 0.78125, 0.99609375)
-DARK_RED_TEXT_COL = c4d.Vector(0.99609375, 0, 0)
-
-
+ACCENT_COL = c4d.Vector(1, 0.337, 0)
+ACCENT_COL_C4D = c4d.Vector(.36, 0.38, .65)
 
 # ---------------------------------------------------------------------
 #       Creating GUI Instance Functions UI Elements Operations 
 #                          Hepler Methods. 
 # ---------------------------------------------------------------------
 
-def AddLinkBoxList_GUI(ui_ins, ui_id, w_size, h_size, enable_state_flags):
-    """ 
-    This GUI name is really call a c4d.gui.InExcludeCustomGui.
-    / InExclude custom GUI (CUSTOMGUI_INEXCLUDE_LIST). 
-    """
-    #First create a container that will hold the items we will allow to be dropped into the INEXCLUDE_LIST gizmo
-    acceptedObjs = c4d.BaseContainer()
-    acceptedObjs.InsData(c4d.Opolygon, "") # -> # Accept point objects 
-                                             # Take a look at c4d Objects Types in SDK.
-    # Create another base container for the INEXCLUDE_LIST gizmo's settings and add the above container to it
-    bc_IEsettings = c4d.BaseContainer()
-    bc_IEsettings.SetData(c4d.IN_EXCLUDE_FLAG_SEND_SELCHANGE_MSG, True)
-    bc_IEsettings.SetData(c4d.IN_EXCLUDE_FLAG_INIT_STATE, 1)
-    """ 
-    Its buttons with states for each object in the list container gui of the CUSTOMGUI_INEXCLUDE_LIST.
-    feel free to enable this in the ui by seting the  enable_state_flags to True. 
-    """
-    if enable_state_flags == True:
-        bc_IEsettings.SetData(c4d.IN_EXCLUDE_FLAG_NUM_FLAGS, 1)
-        # button 1
-        bc_IEsettings.SetData(c4d.IN_EXCLUDE_FLAG_IMAGE_01_ON, c4d.RESOURCEIMAGE_OK) # -> Id Icon or Plugin Id 
-        bc_IEsettings.SetData(c4d.IN_EXCLUDE_FLAG_IMAGE_01_OFF, c4d.RESOURCEIMAGE_CANCEL)
-        
-    bc_IEsettings.SetData(c4d.DESC_ACCEPT, acceptedObjs)        
-    # bc_IEsettings.SetData(c4d.DESC_EDITABLE, False)
-    ui_ins.AddCustomGui(ui_id, c4d.CUSTOMGUI_INEXCLUDE_LIST, "", c4d.BFH_SCALEFIT|c4d.BFV_SCALEFIT, w_size, h_size, bc_IEsettings)
-    return True
+#----------------------------------------------------------------------
+#  TreeViewFunctions Class
+#----------------------------------------------------------------------
 
-
-def Add_ProgressBar_GUI(ui_ins, progressbar_ui_id, strText_id, w_size, h_size):
-    """
-    Create ProgressBar GUI
-    """
-    ui_ins.GroupBegin(0, c4d.BFH_SCALEFIT|c4d.BFV_SCALEFIT, 0, 1)   
-    ui_ins.GroupBorderNoTitle(c4d.BORDER_THIN_IN)
-    # ProgressBar
-    ui_ins.AddCustomGui(progressbar_ui_id, c4d.CUSTOMGUI_PROGRESSBAR, "", c4d.BFH_SCALEFIT|c4d.BFV_SCALEFIT, w_size, h_size)
-    ui_ins.AddSeparatorV(0, c4d.BFV_SCALEFIT)
-    # Static UI Text
-    ui_ins.AddStaticText(strText_id, c4d.BFH_MASK, 50, h_size, "", c4d.BORDER_WITH_TITLE_BOLD) 
-    ui_ins.GroupEnd() # Group End           
-    return True
-
-def Run_ProcessBar(ui_ins, progressbar_ui_id, percent_ui_id, percent, col):
-    # Set Data to PROGRESSBAR
-    progressMsg = c4d.BaseContainer(c4d.BFM_SETSTATUSBAR)
-    progressMsg[c4d.BFM_STATUSBAR_PROGRESSON] = True
-    progressMsg[c4d.BFM_STATUSBAR_PROGRESS] = percent/100.0 
-    # this if you want a custom color
-    if col:
-        ui_ins.SetDefaultColor(progressbar_ui_id, c4d.COLOR_PROGRESSBAR, col)    
-    ui_ins.SendMessage(progressbar_ui_id, progressMsg)
-    ui_ins.SetString(percent_ui_id, str(int(percent))+"%")
-    # Return Percent String Data  
-    return int(percent)
-  
-def Stop_ProgressBar(ui_ins, progressbar_ui_id):
-    progressMsg = c4d.BaseContainer(c4d.BFM_SETSTATUSBAR)
-    progressMsg.SetBool(c4d.BFM_STATUSBAR_PROGRESSON, False)
-    ui_ins.SendMessage(progressbar_ui_id, progressMsg)
-    return True
-
-# ------------------------------------------------------------------------------------ #
-
-# ----------------------------------------
-#  // UI Object List Subdialog //
-# ----------------------------------------
-
-class InstanceObjectListDialog(c4d.gui.SubDialog):
-    def __init__(self):  
-        super().__init__()
-
-    def CreateLayout(self):
-        #First create a container that will hold the items we will allow to be dropped into the INEXCLUDE_LIST gizmo
-        acceptedObjs = c4d.BaseContainer()
-        acceptedObjs.InsData(c4d.Opolygon, "") # -> # Accept point objects 
-                                                # Take a look at c4d Objects Types in SDK.
-        # Create another base container for the INEXCLUDE_LIST gizmo's settings and add the above container to it
-        bc = c4d.BaseContainer()
-        bc.SetData(c4d.IN_EXCLUDE_FLAG_SEND_SELCHANGE_MSG, True)
-        bc.SetData(c4d.IN_EXCLUDE_FLAG_INIT_STATE, 1)
-        """ 
-        Its buttons with states for each object in the list container gui of the CUSTOMGUI_INEXCLUDE_LIST.
-        feel free to enable this in the ui by seting the  enable_state_flags to True. 
+class InstanceListFns(c4d.gui.TreeViewFunctions):
+    def GetBackgroundColor(self, root: object, userdata: object, obj: object, line: int, col: int | Vector) -> int | Vector:
+        return BG_DARKER if line % 2 else BG_DARK
+    def EmptyText(self, root: object, userdata: object) -> str:
+        return "Add objects by dragging them here, \nor opening Instantce! with objects selected."
+    def GetFirst(self, root, userdata):
+        return root[0] if root else None
+        return root.GetFirstObject()
+    def GetDown(self, root, userdata, obj):
+        return None
+        return obj.GetDown()
+    def GetNext(self, root, userdata, obj):
+        currentObjIndex = root.index(obj)
+        return root[currentObjIndex+1] if currentObjIndex+1 < len(root) else None
+    def GetPred(self, root, userData, item):
         """
-        bc.SetData(c4d.IN_EXCLUDE_FLAG_NUM_FLAGS, 1)
-        # button 1
-        bc.SetData(c4d.IN_EXCLUDE_FLAG_IMAGE_01_ON, c4d.RESOURCEIMAGE_OK) # -> Id Icon or Plugin Id 
-        bc.SetData(c4d.IN_EXCLUDE_FLAG_IMAGE_01_OFF, c4d.RESOURCEIMAGE_CANCEL)
+        Gets the predecessor item for #item in #data.
+        """
+        i: int = root.index(item)
+        return root[i-1] if (i - 1) >= 0 else None
+    def IsOpened(self, root, userdata, obj):
+        return obj.GetBit(c4d.BIT_OFOLD)
+    def Open(self, root, userdata, obj, onoff):
+        if onoff:
+            obj.SetBit(c4d.BIT_OFOLD)
+        else:
+            obj.DelBit(c4d.BIT_OFOLD)
+    def IsSelected(self, root, userdata, obj):
+        return obj.GetBit(c4d.BIT_ACTIVE)
+    def Select(self, root, userdata, obj, mode):
+        if mode == c4d.SELECTION_NEW:
+            obj.SetBit(c4d.BIT_ACTIVE)
+            doc.SetActiveObject(obj, c4d.SELECTION_NEW)
+        elif mode == c4d.SELECTION_ADD:
+            obj.SetBit(c4d.BIT_ACTIVE)
+            doc.SetActiveObject(obj, c4d.SELECTION_ADD)
+        else:
+            obj.DelBit(c4d.BIT_ACTIVE)
+            doc.SetActiveObject(obj, c4d.SELECTION_SUB)
+        c4d.EventAdd()
+    def GetID(self, root, userdata, obj):
+        return obj.GetGUID()
+    def GetName(self, root, userdata, obj):
+        return obj.GetName()
+    def GetDragType(self, root, userdata, obj):
+        return c4d.DRAGTYPE_ATOMARRAY
+    def AcceptDragObject(self, root, userdata, obj, dragtype, dragobject):
+        if dragtype == c4d.DRAGTYPE_ATOMARRAY:
+            return c4d.INSERT_UNDER, False
+        return 0
+    def InsertObject(self, root, userData, item, dragType: int, dragData: any, insertMode: int, doCopy: bool) -> None:
+        """
+        Called by Cinema 4D once a drag event has finished which before has been indicated as valid by #AcceptDragObject.
+        """
+        new_items = [item for item in dragData if item not in root and item.GetType() == c4d.Opolygon]
+        root.extend(new_items)
+    def DeletePressed(self, root: object, userdata: object) -> None:
+        for element in reversed(root):
+            if self.IsSelected(root, userdata, element):
+                root.remove(element)
 
-        bc.SetData(c4d.DESC_ACCEPT, acceptedObjs)        
+class InstanceTreeFns(c4d.gui.TreeViewFunctions):
+    def GetBackgroundColor(self, root: object, userdata: object, obj: object, line: int, col: int | Vector) -> int | Vector:
+        return BG_DARKER if line % 2 else BG_DARK
+    def GetFirst(self, root, userdata):
+        return root[list(root.keys())[0]][0]
+        return root[0] if root else None
+    def GetDown(self, root, userdata, obj):
+        if root[obj["hash"]].index(obj) == 0:
+            return root[obj["hash"]][1] if len(root[obj["hash"]]) > 1 else None
+        return None
+    def GetNext(self, root, userdata, obj):
+        if root[obj["hash"]].index(obj) == 0:
+            key_list = list(root.keys())
+            return root[key_list[key_list.index(obj["hash"])+1]][0] if key_list.index(obj["hash"])+1 < len(key_list) else None
+        else:
+            currentObjIndex = root[obj["hash"]].index(obj)
+            return root[obj["hash"]][currentObjIndex+1] if currentObjIndex+1 < len(root[obj["hash"]]) else None
+    def IsOpened(self, root, userdata, obj):
+        return obj["opened"]
+    def Open(self, root, userdata, obj, onoff):
+        if onoff:
+            obj["opened"] = True
+        else:
+            obj["opened"] = False
+    def IsSelected(self, root, userdata, obj):
+        return obj["obj"].GetBit(c4d.BIT_ACTIVE)
+    def Select(self, root, userdata, obj, mode):
+        if mode == c4d.SELECTION_NEW:
+            obj["obj"].SetBit(c4d.BIT_ACTIVE)
+            doc.SetActiveObject(obj["obj"], c4d.SELECTION_NEW)
+        elif mode == c4d.SELECTION_ADD:
+            obj["obj"].SetBit(c4d.BIT_ACTIVE)
+            doc.SetActiveObject(obj["obj"], c4d.SELECTION_ADD)
+        else:
+            obj["obj"].DelBit(c4d.BIT_ACTIVE)
+            doc.SetActiveObject(obj["obj"], c4d.SELECTION_SUB)
+        c4d.EventAdd()
+    def GetID(self, root, userdata, obj):
+        return obj["obj"].GetGUID()
+    def GetName(self, root, userdata, obj):
+        return obj["obj"].GetName()
 
-        self.AddCustomGui(INSTANTCE_ID_INEXCLUDE_LIST, c4d.CUSTOMGUI_INEXCLUDE_LIST, "", c4d.BFH_SCALEFIT|c4d.BFV_SCALEFIT, 0, 0, bc)
+####################################################################################################
+##                                                                                                ##
+##                                             UI                                                 ##
+##                                                                                                ##
+####################################################################################################
+
+VERSION_NUMBER = " v1.0 "
+ABOUT_TEXT_COPYRIGHT = "©2023 by Jérôme Stephan & Darby Edelen"
+ABOUT_TEXT_WEBSITE = "https://jeromestephan.de"
+ABOUT_LINK_README = "https://jeromestephan.gumroad.com/l/Instantce?layout=profile"
+ABOUT_SUPPORT = "https://jeromestephan.gumroad.com/"
+
+GROUP_BORDER_SPACE = 6
+GROUP_BORDER_SPACE_SM = GROUP_BORDER_SPACE - 2
+
+ID_LINK_ABOUT = 11000
+ID_LINK_README = 11001
+ID_AUTHOR_TEXT = 11002
+ID_LINK_WEBSITE = 11003
+ID_SUPPORT_ME = 11004
+ID_VERSION_NUMBER = 11005
+
+ID_INEXCLUDE_LIST = 10000
+ID_EXTRACT_BTN = 10001
+ID_PROCESS_BTN = 10002
+
+ID_PROGRESSBAR = 10100
+ID_PROGRESSBAR_TEXT = 10101
+
+ID_PRECISION = 10200
+ID_SAMPLES = 10201
+ID_SEED = 10202
+ID_BLIND_MODE = 10203
+
+ID_CONSIDER_TAGORDER = 10301
+ID_CONSIDER_MATERIALS = 10302
+ID_CONSIDER_NORMALS = 10303
+ID_CONSIDER_OTHERTAGS = 10304
+ID_CONSIDER_UVS = 10305
+
+ID_BLANK = 101010
+
+class MainDialog(c4d.gui.GeDialog):
+
+    def AddTreeView(self, w_size, h_size):
+        bc_IEsettings = c4d.BaseContainer()
+        bc_IEsettings.SetData(c4d.TREEVIEW_OUTSIDE_DROP, True)
+        bc_IEsettings.SetData(c4d.TREEVIEW_ALTERNATE_BG, True)
+        self._treeView = self.AddCustomGui(ID_INEXCLUDE_LIST, c4d.CUSTOMGUI_TREEVIEW, "", c4d.BFH_SCALEFIT|c4d.BFV_SCALEFIT, w_size, h_size, bc_IEsettings)
+        tree_settings = c4d.BaseContainer()
+        tree_settings.SetInt32(0, c4d.LV_TREE)
+        self._treeView.SetLayout(1, tree_settings)
+        return True
+    
+    def UpdateTreeView(self, root, treeViewFns):
+        self._treeView.SetRoot(root, treeViewFns, None)
+        self._treeView.Refresh()
+        return True
+    
+    def Extract(self, instance_args):
+        if self._listViewRoot:
+            start = time.perf_counter()
+            blind = instance_args["blind"]
+            reportBack = None if blind else self
+            self._instanceFinder = InstanceFinder(self._listViewRoot, 
+                                            consider_dict = instance_args["consider"],
+                                            precision = instance_args["precision"], 
+                                            samples = instance_args["samples"], 
+                                            seed = instance_args["seed"],
+                                            reportBack = reportBack,
+                                            doc = doc)
+            self._instanceFinder.build_instance_dict()
+            instance_count = len(self._instanceFinder.instance_groups)
+            total_count = self._instanceFinder.poly_objs_count
+
+            duration = time.perf_counter() - start
+            if instance_count > 0:
+                print(f"Recognized {total_count - instance_count} objects with instances in {duration:.03} seconds ({((total_count - instance_count)/duration):.02f} objects / second). Remaining objects: {instance_count}")
+                self.UpdateTreeView(self._instanceFinder.instance_groups, InstanceTreeFns())
+            c4d.EventAdd()
+        else: 
+            print("No Objects in the List")
+        return True
+    
+    def ClearExtraction(self):
+        self._instanceFinder = None
+        self.UpdateTreeView(self._listViewRoot, self._listViewFns)
         return True
 
+    def Process(self):
+        if self._instanceFinder:
+            start = time.perf_counter()
+            self._instanceFinder.create_instances()
+            instance_count = len(self._instanceFinder.instance_groups)
+            total_count = self._instanceFinder.poly_objs_count
 
-# ----------------------------------------
-#  // UI Main Window //
-# ----------------------------------------
-class InstantceMainDialog(c4d.gui.GeDialog):
+            duration = time.perf_counter() - start
+            if instance_count > 0:
+                print(f"Replaced {total_count - instance_count} objects with instances in {duration:.03} seconds ({((total_count - instance_count)/duration):.02f} objects / second). Remaining objects: {instance_count}")
+                self._listViewRoot = []
+                self.UpdateTreeView(self._listViewRoot, self._listViewFns)
+            c4d.EventAdd()
+        else:
+            print("No Instances extracted yet")
+            return False
+        return True
+    
+    def AddProgressBar(self, w_size, h_size):
+        self.GroupBegin(0, c4d.BFH_SCALEFIT, 0, 1)   
+        self.GroupBorderNoTitle(c4d.BORDER_THIN_IN)
+        self.AddCustomGui(ID_PROGRESSBAR, c4d.CUSTOMGUI_PROGRESSBAR, "", c4d.BFH_SCALEFIT|c4d.BFV_SCALEFIT, w_size, h_size)
+        self.AddSeparatorV(0, c4d.BFV_SCALEFIT)
+        self.AddStaticText(ID_PROGRESSBAR_TEXT, c4d.BFH_MASK, 50, h_size, "", c4d.BORDER_WITH_TITLE_BOLD) 
+        self.GroupEnd()
+        return True
+    
+    def UpdateProgressBar(self, percent, col):
+        progressMsg = c4d.BaseContainer(c4d.BFM_SETSTATUSBAR)
+        progressMsg[c4d.BFM_STATUSBAR_PROGRESSON] = True
+        progressMsg[c4d.BFM_STATUSBAR_PROGRESS] = percent/100.0 
+        # this if you want a custom color
+        if col:
+            self.SetDefaultColor(ID_PROGRESSBAR, c4d.COLOR_PROGRESSBAR, col)    
+        self.SendMessage(ID_PROGRESSBAR, progressMsg)
+        self.SetString(ID_PROGRESSBAR_TEXT, str(int(percent))+"%")
+        return True
+    
+    def StopProgressBar(self):
+        progressMsg = c4d.BaseContainer(c4d.BFM_SETSTATUSBAR)
+        progressMsg.SetBool(c4d.BFM_STATUSBAR_PROGRESSON, False)
+        self.SendMessage(ID_PROGRESSBAR, progressMsg)
+        return True
+        
     # ====================================== #        
     #  Main GeDialog Class Overrides
     # ====================================== #
@@ -383,73 +515,133 @@ class InstantceMainDialog(c4d.gui.GeDialog):
         """
         The __init__ is an Constuctor and help get 
         and passes data on from the another class.
-        """        
-        super(InstantceMainDialog, self).__init__()
-
-        self.object_list_subdlg = InstanceObjectListDialog()
-
-
-    def Process(self, instance_args):
-        doc = documents.GetActiveDocument()
-        LinkList = self.object_list_subdlg.FindCustomGui(INSTANTCE_ID_INEXCLUDE_LIST, c4d.CUSTOMGUI_INEXCLUDE_LIST)
-        ObjectListData = LinkList.GetData()
-        objs = [ObjectListData.ObjectFromIndex(doc, i) for i in range(ObjectListData.GetObjectCount()) if ObjectListData.GetFlags(i)]
-        if objs:
-            startInstantce(objects=objs, instance_args=instance_args, reportBack = self)
-        else: 
-            print("No Objects in the List")
-        return True
-
-
-    def UpdateProgressBar(self, percent, col):
-        """ Update Progress Bar """
-        # self.SetString(self.IDS_PROCESSBAR_TEXT, Run_ProcessBar(ui_ins=self, progressbar_ui_id=self.IDS_PROCESSBAR_GUI, percent_ui_id=self.IDS_PROCESSBAR_TEXT , percent=percent, col=col))
-        Run_ProcessBar(ui_ins=self, progressbar_ui_id=INSTANTCE_ID_PROGRESSBAR, percent_ui_id=INSTANTCE_ID_PROGRESSBAR_TEXT , percent=percent, col=col)
-        return True
-
-
-    def StopProgressBar(self):
-        """ Stop Progress Bar """
-        Stop_ProgressBar(ui_ins=self, progressbar_ui_id=INSTANTCE_ID_PROGRESSBAR)
-        return True       
-        
+        """      
+        self._instanceFinder: InstanceFinder | None = None  
+        self._treeView: c4d.gui.TreeViewCustomGui | None = None
+        self._listViewFns = InstanceListFns()
+        self._treeViewFns = InstanceTreeFns()
+        self._listViewRoot = None
+        self._treeViewRoot = None
+        self.extracted = False
+        # super(Tool_WindowDialog, self).__init__()
 
     # UI Layout
     def CreateLayout(self):
-        result =  self.LoadDialogResource(DLG_INSTANTCE_MAIN)
+        # Dialog Title
+        self.SetTitle("Instantce!")
+        
+        self.MenuSubBegin("About")
+        self.MenuAddString(ID_LINK_ABOUT, "About")
+        self.MenuAddString(ID_LINK_README, "Readme")
+        self.MenuSubEnd()
+        
+        self.MenuSubBegin("Support this project & me!")
+        self.MenuAddString(ID_SUPPORT_ME, "Support this & other projects (& me) on Gumroad!")
+        self.MenuSubEnd()
+        self.MenuFinished()
+        
+        # Top Menu addinng Tool Version
+        self.GroupBeginInMenuLine()
+        self.AddStaticText(ID_VERSION_NUMBER, 0)
+        self.SetString(ID_VERSION_NUMBER, VERSION_NUMBER)
+        self.GroupEnd()        
+        
+        # self.GroupBegin(self.IDS_OverallGrp, c4d.BFH_SCALEFIT, 1, 0, "") # Overall Group.
+        
+        # Static UI Text
+        # self.AddStaticText(self.IDS_StaticText, c4d.BFH_CENTER, 0, 15, "Instantce Demo", c4d.BORDER_WITH_TITLE_BOLD)
+        
+        # self.AddSeparatorH(0, c4d.BFH_SCALEFIT) # Line Separator / eg: self.AddSeparatorH(0, c4d.BFH_MASK) and AddSeparatorV 
 
-        if not self.AttachSubDialog(self.object_list_subdlg, DLG_INSTANTCE_OBJECT_LIST):
-            raise RuntimeError("Failed to attach subdialog element.")
+        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT | c4d.BFV_SCALEFIT, 2, 0, "") 
+        self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
+        
+        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT | c4d.BFV_SCALEFIT, 1, 0, "") 
+        self.AddStaticText(ID_BLANK, c4d.BFH_LEFT, 0, 15, " Objects :", c4d.BORDER_WITH_TITLE_BOLD)
+        self.AddTreeView(w_size=500, h_size=300)
+        self.GroupEnd()        
 
-        self.LayoutChanged(DLG_INSTANTCE_OBJECT_LIST)
+        # self.AddSeparatorV(0, c4d.BFV_SCALEFIT)
+        
+        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT|c4d.BFV_TOP, 1, 0, "")
+        self.AddStaticText(ID_BLANK, c4d.BFH_LEFT, 0, 15, " Settings :", c4d.BORDER_WITH_TITLE_BOLD)
+        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT, title="Precision")
+        self.GroupBorder(c4d.BORDER_GROUP_IN)
+        self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE_SM, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
+        self.AddEditSlider(ID_PRECISION, c4d.BFH_SCALEFIT, 0, 0)
+        self.GroupEnd()
 
-        return result
+        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT, title="Samples")
+        self.GroupBorder(c4d.BORDER_GROUP_IN)
+        self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE_SM, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
+        self.AddEditSlider(ID_SAMPLES, c4d.BFH_SCALEFIT, 0, 0)
+        self.GroupEnd()
 
+        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT, title="Sampling Seed")
+        self.GroupBorder(c4d.BORDER_GROUP_IN)
+        self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE_SM, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
+        self.AddEditSlider(ID_SEED, c4d.BFH_SCALEFIT, 0, 0)
+        self.GroupEnd()
+
+        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT, title="Consider", cols=1)
+        self.GroupBorder(c4d.BORDER_GROUP_IN)
+        self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE_SM, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
+        self.AddCheckbox(ID_CONSIDER_MATERIALS, c4d.BFH_SCALEFIT, 0, 0, "Materials")
+        self.AddCheckbox(ID_CONSIDER_NORMALS, c4d.BFH_SCALEFIT, 0, 0, "Normals")
+        self.AddCheckbox(ID_CONSIDER_UVS, c4d.BFH_SCALEFIT, 0, 0, "UVs")
+        self.GroupEnd()
+
+        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT)
+        self.GroupBorder(c4d.BORDER_GROUP_IN)
+        self.GroupBorderSpace(GROUP_BORDER_SPACE, GROUP_BORDER_SPACE_SM, GROUP_BORDER_SPACE, GROUP_BORDER_SPACE)
+        self.AddCheckbox(ID_BLIND_MODE, c4d.BFH_SCALEFIT, 0, 0, "Blind Mode")
+        self.GroupEnd()
+
+        self.GroupEnd() 
+        self.GroupEnd() # After this, we are in Overall group.
+                      
+        self.AddSeparatorH(0, c4d.BFH_SCALEFIT)
+        self.AddProgressBar(w_size=100, h_size=10)
+        # self.AddSeparatorH(0, c4d.BFH_SCALEFIT)
+        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT, title="", cols = 2)
+        self.AddButton(ID_EXTRACT_BTN, c4d.BFH_SCALEFIT, 0, 30, name="Extract Instances") 
+        self.AddButton(ID_PROCESS_BTN, c4d.BFH_SCALEFIT, 0, 30, name="Instantce!") 
+        self.GroupEnd()
+
+        # self.AddSubDialog(ID_BLANK, c4d.BFV_SCALEFIT, 0, 0)
+        self.GroupBegin(ID_BLANK, c4d.BFH_SCALEFIT, title="About", cols = 2)
+        self.AddSeparatorH(c4d.BFH_SCALEFIT)
+        self.AddSeparatorH(c4d.BFH_SCALEFIT)
+        self.AddSubDialog(ID_BLANK, c4d.BFH_SCALEFIT, 0, 0)
+        self.AddStaticText(ID_AUTHOR_TEXT, c4d.BFH_RIGHT, 0, 0, ABOUT_TEXT_COPYRIGHT)
+        # self.AddRadioText(ID_LINK_WEBSITE, c4d.BFH_FIT, 0, 0, ABOUT_TEXT_WEBSITE)
+        self.GroupEnd()
+        
+        # self.AddSeparatorH(0, c4d.BFH_SCALEFIT)
+        # self.GroupEnd() # End of the overall group.        
+        return True
 
     def InitValues(self):
         """ 
         Called when the dialog is initialized by the GUI / GUI's startup values basically.
         """
-        # self.SetDefaultColor(self.IDS_OverallGrp, c4d.COLOR_BG, BG_DARK)
-        # self.SetDefaultColor(self.IDS_StaticText, c4d.COLOR_TEXT, DARK_BLUE_TEXT_COL) 
-        self.SetDefaultColor(INSTANTCE_ID_VER, c4d.COLOR_TEXT, DARK_RED_TEXT_COL)
-        self.SetString(INSTANTCE_ID_PROGRESSBAR_TEXT, "0%")
-        self.SetInt32(INSTANTCE_ID_PRECISION, 3, min=1, max=5, step=1, min2=1, max2=10)
-        self.SetInt32(INSTANTCE_ID_SAMPLES, 100, min=10, max=1000, step=1, min2=10, max2=100000)
-        self.SetInt32(INSTANTCE_ID_SEED, 12345, min=0, max=99999, step=1)
+        global doc
+        doc =  c4d.documents.GetActiveDocument()
+        self.SetDefaultColor(ID_INEXCLUDE_LIST, c4d.COLOR_BG, BG_DARKER)
+        self.SetDefaultColor(ID_VERSION_NUMBER, c4d.COLOR_TEXT, ACCENT_COL_C4D)
+        self.SetString(ID_PROGRESSBAR_TEXT, "0%")
+        self.SetInt32(ID_PRECISION, 3, min=0, max=5, step=1, max2=10)
+        self.SetInt32(ID_SAMPLES, 100, min=0, max=1000, step=1, max2=100000)
+        self.SetInt32(ID_SEED, 12345, min=0, max=99999, step=1)
 
-        self.SetBool(INSTANTCE_ID_CONSIDER_MATERIALS, False)
-        self.SetBool(INSTANTCE_ID_CONSIDER_NORMALS, True)
-        self.SetBool(INSTANTCE_ID_CONSIDER_UVS, True)
+        # self.SetBool(ID_CONSIDER_TAGORDER, True)
+        self.SetBool(ID_CONSIDER_NORMALS, True)
+        self.SetBool(ID_CONSIDER_UVS, True)
 
-        selected = documents.GetActiveDocument().GetActiveObjects(c4d.GETACTIVEOBJECTFLAGS_SELECTIONORDER)
-        LinkList =  self.object_list_subdlg.FindCustomGui(INSTANTCE_ID_INEXCLUDE_LIST, c4d.CUSTOMGUI_INEXCLUDE_LIST)
-        LinkListData = LinkList.GetData()
-        for obj in selected:
-            LinkListData.InsertObject(obj, 1)
-        LinkList.SetData(LinkListData)
-        
-        #self.Enable(self.IDS_MULTI_LINE_STRINGBOX, False)# --> # Disable or Enable Mode of the user interaction       
+        self.Enable(ID_PROCESS_BTN, False)
+
+        self._listViewRoot = [obj for obj in doc.GetActiveObjects(c4d.GETACTIVEOBJECTFLAGS_CHILDREN) if obj.GetType() == c4d.Opolygon] #c4d.GETACTIVEOBJECTFLAGS_SELECTIONORDER)]
+        self.UpdateTreeView(self._listViewRoot, self._listViewFns)
         return True 
  
     def Command(self, id, msg):
@@ -460,20 +652,48 @@ class InstantceMainDialog(c4d.gui.GeDialog):
         :param bc: The original message container
         :return: False if there was an error, otherwise True.
         """
-        if (id == INSTANTCE_ID_PROCESS_BTN):
+        if (id == ID_EXTRACT_BTN and not self.extracted):
             consider_dict = {
-                "materials":    self.GetBool(INSTANTCE_ID_CONSIDER_MATERIALS),
-                "normals":   self.GetBool(INSTANTCE_ID_CONSIDER_NORMALS),
-                "uvs":          self.GetBool(INSTANTCE_ID_CONSIDER_UVS),
+                "materials":    self.GetBool(ID_CONSIDER_MATERIALS),
+                "normals":      self.GetBool(ID_CONSIDER_NORMALS),
+                "uvs":          self.GetBool(ID_CONSIDER_UVS),
             }
             instance_args = {
-                "precision":    self.GetBool(INSTANTCE_ID_PRECISION),
-                "samples":      self.GetBool(INSTANTCE_ID_SAMPLES),
-                "seed":         self.GetBool(INSTANTCE_ID_SEED),
-                "blind":        self.GetBool(INSTANTCE_ID_BLIND_MODE),
+                "precision":    self.GetInt32(ID_PRECISION),
+                "samples":      self.GetInt32(ID_SAMPLES),
+                "seed":         self.GetInt32(ID_SEED),
+                "blind":        self.GetBool(ID_BLIND_MODE),
                 "consider":     consider_dict,
             }
-            self.Process(instance_args)
+            self.Extract(instance_args)
+            self.extracted = True
+            self.SetString(ID_EXTRACT_BTN, "Clear Instances")
+            self.Enable(ID_PROCESS_BTN, True)
+        
+        elif (id == ID_EXTRACT_BTN and self.extracted):
+            self.ClearExtraction()
+            self.extracted = False
+            self.SetString(ID_EXTRACT_BTN, "Extract Instances")
+            self.Enable(ID_PROCESS_BTN, False)
+
+        elif (id == ID_PROCESS_BTN):
+            self.extracted = False
+            self.SetString(ID_EXTRACT_BTN, "Extract Instances")
+            self.Enable(ID_PROCESS_BTN, False)
+            self.Process()
+
+
+
+        
+        elif id == ID_LINK_ABOUT:
+            about_dlg = AboutDialog()
+            about_dlg.Open(c4d.DLG_TYPE_MODAL, xpos=-2, ypos=-2)
+        elif id == ID_LINK_README:
+            webbrowser.open(ABOUT_LINK_README)
+        elif id == ID_LINK_WEBSITE:
+            webbrowser.open(ABOUT_TEXT_WEBSITE)
+        elif id == ID_SUPPORT_ME:
+            webbrowser.open(ABOUT_SUPPORT)
                     
         return True
     
@@ -487,33 +707,47 @@ class InstantceMainDialog(c4d.gui.GeDialog):
             pass
         return True
 
-
-class InstantceCommand(c4d.plugins.CommandData):
-    dialog = None
-
-    def Execute(self, doc):
-        if self.dialog is None:
-            self.dialog = InstantceMainDialog()
-
-        return self.dialog.Open(c4d.DLG_TYPE_ASYNC, PLUGIN_ID)
+class AboutDialog(c4d.gui.GeDialog):
+    def CreateLayout(self):
+        self.SetTitle("About")
+        self.AddStaticText(ID_BLANK, c4d.BFH_CENTER, 0, 0, "Instantce")
+        self.AddStaticText(ID_BLANK, c4d.BFH_CENTER, 0, 0, VERSION_NUMBER)
+        self.AddStaticText(ID_BLANK, c4d.BFH_CENTER, 0, 0, "Instantly recognize & replace identical objects with instances!")
+        self.AddSeparatorH(c4d.BFH_SCALEFIT)
+        self.AddStaticText(ID_AUTHOR_TEXT, c4d.BFH_FIT, 0, 0, "Authors:\t\tMarvin Jérôme Stephan & Darby Edelen")
+        self.AddRadioText(ID_SUPPORT_ME, c4d.BFH_FIT, 0, 0, "Support me:\t" + ABOUT_SUPPORT)
+        self.AddRadioText(ID_LINK_WEBSITE, c4d.BFH_FIT, 0, 0, "Website:\t\t" + ABOUT_TEXT_WEBSITE)
+        return True
     
-    def RestoreLayout(self, secret):
-        if self.dialog is None:
-            self.dialog = InstantceMainDialog()
-        
-        return self.dialog.Restore(PLUGIN_ID, secret)
+    def Command(self, mid, msg):
+        if mid == ID_SUPPORT_ME:
+            webbrowser.open(ABOUT_SUPPORT)
+        elif mid == ID_LINK_WEBSITE:
+            webbrowser.open(ABOUT_TEXT_WEBSITE)
+        return True
+
+
+class MainDialogCommand(c4d.plugins.CommandData):
+    dlg = None
+    def Execute(self, doc):
+        if self.dlg is None:
+            self.dlg = MainDialog()
+        return self.dlg.Open(c4d.DLG_TYPE_ASYNC, pluginid=PLUGIN_ID, defaultw=0, defaulth=0, xpos=-2, ypos=-2)
+    
+    def RestoreLayout(self, sec_ref):
+        if self.dlg is None:
+            self.dlg = MainDialog()
+        return self.dlg.Restore(pluginid=PLUGIN_ID, secret=sec_ref)
 
 if __name__=='__main__':
-    plugin_dir = os.path.dirname(__file__)
-
-    symbol_parser.parse_and_export_in_caller(plugin_dir)
-
-    if not c4d.plugins.GeResource().Init(plugin_dir):
-            raise RuntimeError(f"Could not access resource at {plugin_dir}")
-    
-    c4d.plugins.RegisterCommandPlugin(id=PLUGIN_ID,
-                                      str=c4d.plugins.GeLoadString(IDS_INSTANTCE_NAME),
-                                      info=0,
-                                      help=c4d.plugins.GeLoadString(IDS_INSTANTCE_HELP),
-                                      dat=InstantceCommand(),
-                                      icon=None)
+    directory, _ = os.path.split(__file__)
+    icon = os.path.join(directory, "res", "Instantce.tif")
+    bmp = c4d.bitmaps.BaseBitmap()
+    if bmp.InitWith(icon)[0] != c4d.IMAGERESULT_OK:
+        raise MemoryError("Failed to initialize the BaseBitmap.")
+    c4d.plugins.RegisterCommandPlugin(id=PLUGIN_ID, 
+                                      str="Instantce!", 
+                                      info=0, 
+                                      help="Instantly recognize & replace identical objects with instances!", 
+                                      dat=MainDialogCommand(), 
+                                      icon=bmp)
